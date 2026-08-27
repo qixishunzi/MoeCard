@@ -1,0 +1,242 @@
+@import "tailwindcss";
+
+/**
+ * MoeCard 样式基座。
+ *
+ * 前台与后台共用一套视觉语言 —— 暖色仪表盘（Warm Dashboard）：
+ * 暖白底 #faf8f5、白色圆角卡片、柔和投影、青/琥珀/陶土配色。
+ *
+ * 组件都在 src/ui 下（Wd* 前缀），前台与后台直接复用同一套。
+ */
+
+@theme {
+  --color-wd-bg: #faf8f5;
+  --color-wd-teal: #4a9d9a;
+  --color-wd-amber: #e8b86d;
+  --color-wd-clay: #c17767;
+  --color-wd-slate: #6b8e8e;
+
+  /* 用系统字体栈：没有额外的网络字体请求，中文显示也更自然 */
+  --font-sans:
+    ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
+    monospace;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background-color: #faf8f5;
+    color: #1f2937;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* 数字统一用等宽数位，表格与金额不会因数字宽度不同而抖动 */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 尊重系统的「减少动态效果」设置 */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer utilities {
+  /* 隐藏滚动条但保留滚动能力（侧栏、横向表格、标签条） */
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* 富文本排版：后台的商品描述预览与前台的商品详情共用 */
+  .wd-rich {
+    line-height: 1.8;
+    color: #4b5563;
+  }
+  .wd-rich :where(h1, h2, h3) {
+    font-weight: 600;
+    color: #1f2937;
+    margin: 1.1em 0 0.5em;
+  }
+  .wd-rich :where(p) {
+    margin: 0 0 0.75em;
+  }
+  .wd-rich :where(strong) {
+    font-weight: 600;
+    color: #1f2937;
+  }
+  .wd-rich :where(ul, ol) {
+    padding-left: 1.4em;
+    margin: 0 0 0.75em;
+  }
+  .wd-rich :where(table) {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.75em 0;
+  }
+  .wd-rich :where(td, th) {
+    border: 1px solid #f3f4f6;
+    padding: 0.5em 0.7em;
+  }
+  .wd-rich :where(img) {
+    max-width: 100%;
+    border-radius: 0.75rem;
+    margin: 0.6em 0;
+  }
+  .wd-rich :where(a) {
+    color: #4a9d9a;
+  }
+  .wd-rich :where(blockquote) {
+    padding: 0.2em 0 0.2em 1.1em;
+    border-left: 3px solid #f3f4f6;
+    color: #6b7280;
+  }
+  .wd-rich :where(pre) {
+    background: #faf8f5;
+    border-radius: 0.75rem;
+    padding: 0.75rem;
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+  }
+}
+
+/**
+ * Modal / Drawer transitions.
+ *
+ * One <Transition> drives both layers: the overlay fades, and the panel
+ * slides via descendant selectors. Nesting a second <Transition> around the
+ * panel used to strand the teleported node in its leave phase, which left the
+ * dialog on screen with its listeners already detached.
+ */
+@layer components {
+  .wd-modal-enter-active,
+  .wd-modal-leave-active,
+  .wd-drawer-enter-active,
+  .wd-drawer-leave-active {
+    transition: opacity 200ms ease;
+  }
+
+  .wd-modal-enter-active .wd-modal-panel,
+  .wd-drawer-enter-active .wd-modal-panel {
+    transition:
+      transform 300ms cubic-bezier(0.16, 1, 0.3, 1),
+      opacity 300ms ease;
+  }
+
+  .wd-modal-leave-active .wd-modal-panel,
+  .wd-drawer-leave-active .wd-modal-panel {
+    transition:
+      transform 200ms ease-in,
+      opacity 200ms ease-in;
+  }
+
+  .wd-modal-enter-from,
+  .wd-modal-leave-to,
+  .wd-drawer-enter-from,
+  .wd-drawer-leave-to {
+    opacity: 0;
+  }
+
+  .wd-modal-enter-from .wd-modal-panel,
+  .wd-modal-leave-to .wd-modal-panel {
+    transform: translateY(12px);
+    opacity: 0;
+  }
+
+  .wd-drawer-enter-from .wd-modal-panel,
+  .wd-drawer-leave-to .wd-modal-panel {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+}
+
+/**
+ * Tab panel transitions.
+ *
+ * Used with <Transition name="wd-tab" mode="out-in"> around whatever the
+ * active tab renders. mode="out-in" matters: the two panels rarely have the
+ * same height, and cross-fading them makes the page jump.
+ */
+@layer components {
+  .wd-tab-enter-active {
+    transition:
+      opacity 200ms ease,
+      transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .wd-tab-leave-active {
+    transition:
+      opacity 120ms ease,
+      transform 120ms ease-in;
+  }
+
+  .wd-tab-enter-from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  .wd-tab-leave-to {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+/**
+ * Dropdown panel transition (WdSelect).
+ *
+ * The panel is teleported to <body>, so it cannot inherit anything from the
+ * trigger; it animates on its own transform origin instead.
+ */
+@layer components {
+  .wd-pop-enter-active {
+    transition: opacity 140ms ease, transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .wd-pop-leave-active {
+    transition: opacity 100ms ease, transform 100ms ease-in;
+  }
+
+  .wd-pop-enter-from,
+  .wd-pop-leave-to {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+}
+
+/** 向上弹出的浮层（页脚的联系客服菜单）。 */
+@layer components {
+  .wd-pop-up-enter-active {
+    transition: opacity 140ms ease, transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .wd-pop-up-leave-active {
+    transition: opacity 100ms ease, transform 100ms ease-in;
+  }
+
+  .wd-pop-up-enter-from,
+  .wd-pop-up-leave-to {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+}

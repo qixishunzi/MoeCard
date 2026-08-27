@@ -1,0 +1,39 @@
+# 行尾统一由这里说了算，不看各人的 core.autocrlf。
+#
+# 为什么必须钉死：install.sh 一旦被存成 CRLF，Linux 上跑起来会直接
+# 报 `bad interpreter: /usr/bin/env sh^M`；而 install.ps1 反过来，
+# Windows PowerShell 5.1 需要 CRLF + BOM 才能正确读带中文的脚本。
+# 两边要求相反，只能逐类型指定。
+
+# 默认：仓库里存 LF，检出时按平台自行处理
+* text=auto eol=lf
+
+# 必须是 LF —— 这些文件会在 Linux 上被当作可执行脚本或配置读取
+*.sh          text eol=lf
+*.service     text eol=lf
+Dockerfile    text eol=lf
+Makefile      text eol=lf
+*.yml         text eol=lf
+*.yaml        text eol=lf
+
+# 必须是 CRLF —— Windows 专用
+*.ps1         text eol=crlf
+*.bat         text eol=crlf
+*.cmd         text eol=crlf
+
+# 二进制：不要做任何行尾转换，也不要试图 diff
+*.png         binary
+*.ico         binary
+*.jpg         binary
+*.jpeg        binary
+*.gif         binary
+*.webp        binary
+*.woff        binary
+*.woff2       binary
+*.exe         binary
+*.db          binary
+
+# GitHub 的语言统计：这些不算项目代码，免得首页被标成 HTML 项目
+web/package-lock.json  linguist-generated=true
+server/go.sum          linguist-generated=true
+docs/**                linguist-documentation=true

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <!-- 小尺寸用单独裁过头部的图：整图缩到 16px 时脸只剩几个像素 -->
+  <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+  <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png" />
+  <link rel="icon" href="/favicon.ico" sizes="48x48" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <title>MoeCard</title>
+  <meta name="description" content="轻量、安全、开箱即用的数字商品商城" />
+  <!--
+    后台入口路径。服务端在返回本文件时会按当前配置改写 content：
+      访问的就是后台入口  -> 填成真实路径，前端据此注册后台路由
+      访问其它任何页面    -> 填成空串，前端根本不注册后台路由
+    这样一来，路径只会告诉「已经知道路径的人」，扫描器抓首页什么也拿不到。
+    开发模式（vite）不经过服务端，保持 admin 即可。
+  -->
+  <meta name="moecard-admin-path" content="admin" />
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

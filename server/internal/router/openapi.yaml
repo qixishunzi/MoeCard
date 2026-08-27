@@ -1,0 +1,1247 @@
+openapi: 3.0.3
+info:
+  title: MoeCard API
+  version: 1.0.0
+  description: |
+    轻量级数字商品自动发货商城 API。
+
+    ## 统一响应结构
+    所有接口（支付回调除外）返回：
+    ```json
+    { "code": 0, "message": "success", "data": {} }
+    ```
+    `code = 0` 表示成功。**前端必须依赖数字 code 判断，不要依赖 message 文案。**
+
+    分页接口的 `data` 结构：
+    ```json
+    { "list": [], "page": 1, "page_size": 20, "total": 100 }
+    ```
+
+    ## 金额
+    所有金额字段均为 **int64 最小货币单位**（人民币 = 分）。
+    `1000` 表示 ¥10.00。前端展示时除以 100。
+
+    ## 时间
+    数据库统一存 UTC。后台接口返回的时间字符串已按商城配置时区（`GET /config` 的 `timezone`）转换。
+
+    ## 鉴权
+    后台接口需要 `Authorization: Bearer <token>`，token 由 `POST /admin/login` 获取。
+    前台接口无需鉴权；订单查询靠「订单号 + 邮箱」或 `query_token` 双因子。
+
+servers:
+  - url: /api/v1
+    description: 当前服务
+
+tags:
+  - name: 商城
+  - name: 订单
+  - name: 支付
+  - name: 初始化
+  - name: 后台-认证
+  - name: 后台-商品
+  - name: 后台-卡密
+  - name: 后台-订单
+  - name: 后台-优惠券
+  - name: 后台-支付
+  - name: 后台-系统
+
+security: []
+
+paths:
+  /config:
+    get:
+      tags: [商城]
+      summary: 获取商城配置
+      description: 前台启动时调用。只返回公开信息，绝不包含 SMTP / 支付密钥。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/ShopConfig' }
+
+  /categories:
+    get:
+      tags: [商城]
+      summary: 商品分类列表
+      description: 只返回启用状态的分类。
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  /products:
+    get:
+      tags: [商城]
+      summary: 商品列表
+      parameters:
+        - { name: category_id, in: query, schema: { type: integer } }
+        - { name: keyword,     in: query, schema: { type: string } }
+        - { name: recommend,   in: query, schema: { type: boolean }, description: 只看推荐商品 }
+        - name: sort
+          in: query
+          schema: { type: string, enum: [default, newest, price_asc, price_desc, sales] }
+        - { name: page,      in: query, schema: { type: integer, default: 1 } }
+        - { name: page_size, in: query, schema: { type: integer, default: 20, maximum: 100 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: '#/components/schemas/PageData'
+                          - type: object
+                            properties:
+                              list:
+                                type: array
+                                items: { $ref: '#/components/schemas/Product' }
+
+  /products/{slug}:
+    get:
+      tags: [商城]
+      summary: 商品详情
+      parameters:
+        - { name: slug, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Product' }
+        '400':
+          description: 商品不存在(45001) / 已下架(45002)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Response' }
+
+  /coupons/verify:
+    post:
+      tags: [商城]
+      summary: 优惠券试算
+      description: |
+        只做校验与金额试算，**不会扣减优惠券次数**。
+        真正的核销发生在支付成功之后。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, product_id, quantity]
+              properties:
+                code:       { type: string, example: SAVE20 }
+                product_id: { type: integer, example: 1 }
+                quantity:   { type: integer, example: 1 }
+                email:      { type: string, description: 有个人限购时必填 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/DiscountResult' }
+        '400':
+          description: |
+            46001 券不存在 / 46002 已过期 / 46003 未开始 / 46004 已领完
+            46005 不适用该商品 / 46006 未达门槛 / 46007 超个人限次 / 46008 已停用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Response' }
+
+  /payments:
+    get:
+      tags: [支付]
+      summary: 可用支付方式列表
+      description: 只返回 id / name / provider / icon，**绝不包含任何配置或密钥**。
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  /orders:
+    post:
+      tags: [订单]
+      summary: 创建订单
+      description: |
+        创建订单会**立即预占库存**（自动发货锁定卡密，手动发货扣减 stock）。
+        超过 `order_expire_minutes` 未支付会自动过期并释放库存。
+
+        响应中的 `query_token` 只在此刻返回一次，请前端妥善保存 ——
+        它可以免邮箱直接查单。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [product_id, quantity, email]
+              properties:
+                product_id:  { type: integer }
+                quantity:    { type: integer, minimum: 1 }
+                email:       { type: string, format: email }
+                coupon_code: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          order:       { $ref: '#/components/schemas/Order' }
+                          query_token: { type: string, description: 免邮箱查单令牌，仅此一次返回 }
+        '400':
+          description: 45003 库存不足 / 47008 商城暂停下单 / 46xxx 优惠券问题
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Response' }
+        '429':
+          description: 请求过于频繁(42901)
+
+  /orders/query:
+    get:
+      tags: [订单]
+      summary: 查询订单
+      description: |
+        两种方式二选一：
+        1. `order_no` + `email`（双因子，防止遍历订单号越权）
+        2. `token`（创建订单时返回的 query_token）
+
+        邮箱比对使用恒定时间比较，避免时序侧信道。
+        **只有订单处于 completed 状态时才会返回发货内容（卡密）。**
+      parameters:
+        - { name: order_no, in: query, schema: { type: string } }
+        - { name: email,    in: query, schema: { type: string } }
+        - { name: token,    in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Order' }
+        '400':
+          description: 订单不存在(47001)。邮箱不匹配也返回此码，避免暴露订单号是否存在。
+
+  /orders/{order_no}/pay:
+    post:
+      tags: [支付]
+      summary: 发起支付
+      parameters:
+        - { name: order_no, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channel_id]
+              properties:
+                channel_id: { type: integer }
+                device:     { type: string, enum: [pc, mobile], description: 不传则按 UA 自动判断 }
+      responses:
+        '200':
+          description: |
+            按 `action` 分支处理：
+            - `redirect` → 跳转 `url`
+            - `qrcode`   → 用 `qrcode` 内容渲染二维码
+            - `form`     → 把 `form_html` 写入页面（会自动提交）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/PayResult' }
+        '400':
+          description: 47002 订单已过期 / 47004 订单已支付 / 48001 支付方式不可用 / 48002 发起支付失败
+
+  /orders/{order_no}/status:
+    get:
+      tags: [订单]
+      summary: 查询支付状态（结果页轮询）
+      description: |
+        **支付结果绝不能只信任支付平台的同步跳转参数。**
+        本接口会以后端记录为准，并在必要时主动向支付平台查询作为回调丢失的兜底。
+      parameters:
+        - { name: order_no, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          order_no:    { type: string }
+                          status:      { type: string }
+                          status_text: { type: string }
+                          paid:        { type: boolean }
+                          completed:   { type: boolean }
+                          pay_amount:  { type: integer }
+
+  /orders/{order_no}/cancel:
+    post:
+      tags: [订单]
+      summary: 取消未支付订单
+      description: 取消会释放预占的库存。
+      parameters:
+        - { name: order_no, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  /payments/notify/{provider}/{channel_id}:
+    post:
+      tags: [支付]
+      summary: 支付异步回调（由支付平台调用）
+      description: |
+        **本接口无鉴权，安全性完全依赖各渠道的签名校验。**
+
+        处理链：
+        1. 校验 URL 中的 provider 与渠道记录一致（防止用弱签名渠道冒充强签名渠道）
+        2. `provider.VerifyNotify()` 验签 —— 唯一的支付真实性判定点
+        3. 金额必须与订单应付金额**严格相等**
+        4. 事务内锁订单行 → 幂等判断 → 核销优惠券 → 发货
+
+        重复推送 N 次也只会发一次货、核销一次券。
+        响应体格式由各渠道要求决定（易支付 `success`、微信 JSON、Stripe 200）。
+      parameters:
+        - { name: provider,   in: path, required: true, schema: { type: string, enum: [yipay_v1, yipay_v2, alipay, wechat, stripe, hashpay] } }
+        - { name: channel_id, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200': { description: 处理成功，响应体由渠道决定 }
+        '400': { description: 验签失败 }
+
+  /setup/status:
+    get:
+      tags: [初始化]
+      summary: 是否需要初始化
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          need_setup: { type: boolean }
+
+  /setup:
+    post:
+      tags: [初始化]
+      summary: 首次初始化
+      description: |
+        只有在系统尚无任何管理员时才能调用。
+        密码强度强制校验（≥8 位、至少两类字符、拒绝常见弱口令），
+        从源头杜绝 admin/admin 这类默认账号。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:  { type: string, minLength: 3, maxLength: 32 }
+                password:  { type: string, minLength: 8 }
+                site_name: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '400': { description: 49107 系统已初始化 / 49106 密码强度不足 }
+
+  /admin/login:
+    post:
+      tags: [后台-认证]
+      summary: 管理员登录
+      description: |
+        限流：IP + 用户名双维度，5 次/分钟。
+        用户名不存在与密码错误返回同一错误码，且响应耗时恒定，防止用户名枚举。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          token:      { type: string }
+                          expires_at: { type: string, format: date-time }
+                          admin:      { type: object }
+        '400': { description: 49105 用户名或密码错误 / 49102 账号已禁用 }
+        '429': { description: 42901 请求过于频繁 }
+
+  /admin/profile:
+    get:
+      tags: [后台-认证]
+      summary: 当前管理员信息
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  /admin/profile/password:
+    put:
+      tags: [后台-认证]
+      summary: 修改自己的密码
+      description: 修改成功后 token_version 会 +1，所有已签发的 token 立即失效。
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [old_password, new_password]
+              properties:
+                old_password: { type: string }
+                new_password: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  /admin/dashboard:
+    get:
+      tags: [后台-系统]
+      summary: Dashboard 统计
+      description: 时间切分按商城配置时区进行（而非 UTC）。
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  /admin/dashboard/trend:
+    get:
+      tags: [后台-系统]
+      summary: 销售趋势
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: days, in: query, schema: { type: integer, enum: [7, 30], default: 7 } }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  /admin/categories:
+    get:
+      tags: [后台-商品]
+      summary: 分类列表
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+    post:
+      tags: [后台-商品]
+      summary: 创建分类
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CategoryInput' }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/categories/{id}:
+    get:
+      tags: [后台-商品]
+      summary: 分类详情
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+    put:
+      tags: [后台-商品]
+      summary: 修改分类
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CategoryInput' }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+    delete:
+      tags: [后台-商品]
+      summary: 删除分类
+      description: 分类下仍有商品时返回 44102，必须先转移或删除商品。
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '400': { description: 44102 分类下仍有商品 }
+
+  /admin/categories/{id}/move:
+    post:
+      tags: [后台-商品]
+      summary: 批量转移分类下的商品
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target_category_id]
+              properties:
+                target_category_id: { type: integer }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/products:
+    get:
+      tags: [后台-商品]
+      summary: 商品列表
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: category_id,   in: query, schema: { type: integer } }
+        - { name: keyword,       in: query, schema: { type: string } }
+        - { name: status,        in: query, schema: { type: string, enum: [on, off] } }
+        - { name: delivery_type, in: query, schema: { type: string, enum: [auto, manual] } }
+        - { name: page,          in: query, schema: { type: integer } }
+        - { name: page_size,     in: query, schema: { type: integer } }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+    post:
+      tags: [后台-商品]
+      summary: 创建商品
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductInput' }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/products/{id}:
+    get:
+      tags: [后台-商品]
+      summary: 商品详情
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+    put:
+      tags: [后台-商品]
+      summary: 修改商品
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductInput' }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+    delete:
+      tags: [后台-商品]
+      summary: 删除商品（软删）
+      description: 软删除。历史订单已保存商品快照，不受影响。
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/products/{id}/status:
+    post:
+      tags: [后台-商品]
+      summary: 上架 / 下架
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [on, off] }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/products/{id}/stock:
+    post:
+      tags: [后台-商品]
+      summary: 修改库存（仅手动发货商品）
+      description: 自动发货商品的库存由卡密数量决定，调用会返回 40002。`-1` 表示无限库存。
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                stock: { type: integer, description: '-1 表示无限库存' }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/products/{id}/codes:
+    get:
+      tags: [后台-卡密]
+      summary: 卡密列表
+      description: 默认返回脱敏内容；传 `reveal=true` 才返回明文（会记入操作日志）。
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id,      in: path,  required: true, schema: { type: integer } }
+        - { name: status,  in: query, schema: { type: string, enum: [unused, locked, sold] } }
+        - { name: keyword, in: query, schema: { type: string } }
+        - { name: reveal,  in: query, schema: { type: boolean, default: false } }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+    post:
+      tags: [后台-卡密]
+      summary: 批量导入卡密
+      description: |
+        一行一个。自动 trim 空格、忽略空行、批内去重、与数据库已有卡密去重。
+        单次最多 20000 条。
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string, example: "AAAA-BBBB-CCCC\nDDDD-EEEE-FFFF" }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          total:     { type: integer }
+                          imported:  { type: integer }
+                          duplicate: { type: integer }
+    delete:
+      tags: [后台-卡密]
+      summary: 批量删除未使用卡密
+      description: 只能删除 unused 状态的卡密。
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ids:        { type: array, items: { type: integer } }
+                all_unused: { type: boolean }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/products/{id}/codes/stats:
+    get:
+      tags: [后台-卡密]
+      summary: 卡密数量统计
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/orders:
+    get:
+      tags: [后台-订单]
+      summary: 订单列表
+      description: 列表页邮箱脱敏、不返回卡密内容。
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: keyword,    in: query, schema: { type: string }, description: 订单号 / 支付流水号 }
+        - { name: email,      in: query, schema: { type: string } }
+        - { name: product,    in: query, schema: { type: string }, description: 商品名关键词 }
+        - { name: status,     in: query, schema: { type: string } }
+        - { name: provider,   in: query, schema: { type: string } }
+        - { name: attention,  in: query, schema: { type: string, enum: ['1'] }, description: 只看需人工处理的异常订单 }
+        - { name: start_at,   in: query, schema: { type: string }, example: '2026-08-01' }
+        - { name: end_at,     in: query, schema: { type: string }, example: '2026-08-31' }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/orders/{id}:
+    get:
+      tags: [后台-订单]
+      summary: 订单详情
+      description: 详情页返回完整邮箱与发货内容。
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/orders/{id}/deliver:
+    post:
+      tags: [后台-订单]
+      summary: 手动发货
+      description: 写入发货内容 → 订单转 completed → 异步给买家发邮件。
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string, example: "账号：xxxx\n密码：xxxx" }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '400': { description: 47003 订单状态不允许发货 }
+
+  /admin/orders/{id}/remark:
+    post:
+      tags: [后台-订单]
+      summary: 修改订单备注
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { remark: { type: string } }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/orders/{id}/refund:
+    post:
+      tags: [后台-订单]
+      summary: 退款
+      description: |
+        `manual=true` 只记账（适用于渠道不支持自动退款的场景）；
+        否则调用支付渠道的退款接口。两种方式都会完整记录退款金额、时间与原因。
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount: { type: integer, description: 分；不传则全额退款 }
+                reason: { type: string }
+                manual: { type: boolean, description: true=仅标记人工退款 }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '400': { description: 48008 渠道不支持自动退款 / 48009 退款失败 }
+
+  /admin/orders/{id}/resend-mail:
+    post:
+      tags: [后台-订单]
+      summary: 重新发送订单邮件
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                template: { type: string, enum: [paid, deliver, manual] }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/coupons:
+    get:
+      tags: [后台-优惠券]
+      summary: 优惠券列表
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+    post:
+      tags: [后台-优惠券]
+      summary: 创建优惠券
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CouponInput' }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/coupons/{id}:
+    get:
+      tags: [后台-优惠券]
+      summary: 优惠券详情（含关联商品）
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+    put:
+      tags: [后台-优惠券]
+      summary: 修改优惠券
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CouponInput' }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+    delete:
+      tags: [后台-优惠券]
+      summary: 删除优惠券
+      description: 历史核销记录（coupon_usages）会保留。
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/coupons/{id}/usages:
+    get:
+      tags: [后台-优惠券]
+      summary: 优惠券核销记录
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/payments/providers:
+    get:
+      tags: [后台-支付]
+      summary: 支持的支付渠道类型及配置字段
+      description: |
+        返回每个 provider 的配置字段描述（key / label / type / required / secret），
+        前端据此动态渲染配置表单。新增支付渠道时前端无需改代码。
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/payments:
+    get:
+      tags: [后台-支付]
+      summary: 支付渠道列表
+      description: 敏感配置项（密钥/私钥）已脱敏。
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+    post:
+      tags: [后台-支付]
+      summary: 新建支付渠道
+      description: 同一 provider 可建多个渠道（如"易支付-主线"和"易支付-备线"）。
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelInput' }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/payments/{id}:
+    get:
+      tags: [后台-支付]
+      summary: 渠道详情（脱敏）
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+    put:
+      tags: [后台-支付]
+      summary: 修改支付渠道
+      description: |
+        **敏感字段若提交的是脱敏值，会自动保留数据库中的旧值。**
+        没有这条规则，管理员改个排序就会把支付密钥覆盖成一串星号。
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelInput' }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+    delete:
+      tags: [后台-支付]
+      summary: 删除支付渠道
+      description: 已产生历史订单的渠道只能禁用，不能删除。
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/payments/{id}/test:
+    post:
+      tags: [后台-支付]
+      summary: 测试渠道配置
+      description: 创建一笔 1 分钱的测试支付单验证配置，只创建不支付，不产生真实扣款。
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/settings:
+    get:
+      tags: [后台-系统]
+      summary: 读取系统配置
+      description: SMTP 密码等敏感项返回脱敏值。
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+    put:
+      tags: [后台-系统]
+      summary: 修改系统配置
+      description: 敏感项提交脱敏值时保留旧值。只接受已知配置键。
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: { type: string } }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/settings/mail/test:
+    post:
+      tags: [后台-系统]
+      summary: 发送测试邮件
+      description: 可传入尚未保存的 SMTP 配置，实现"先测通再保存"。password 留空则使用已保存的密码。
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to]
+              properties:
+                to:         { type: string }
+                host:       { type: string }
+                port:       { type: integer }
+                username:   { type: string }
+                password:   { type: string }
+                from_email: { type: string }
+                from_name:  { type: string }
+                encryption: { type: string, enum: [none, ssl, starttls] }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/admins:
+    get:
+      tags: [后台-系统]
+      summary: 管理员列表
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+    post:
+      tags: [后台-系统]
+      summary: 创建管理员
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string }
+                nickname: { type: string }
+                status:   { type: string, enum: [active, disabled] }
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/admins/{id}:
+    put:
+      tags: [后台-系统]
+      summary: 修改管理员
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username: { type: string }
+                password: { type: string, description: 留空表示不改 }
+                nickname: { type: string }
+                status:   { type: string, enum: [active, disabled] }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '400': { description: 49104 不能禁用最后一个可用管理员 }
+    delete:
+      tags: [后台-系统]
+      summary: 删除管理员
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/logs/operations:
+    get:
+      tags: [后台-系统]
+      summary: 管理员操作日志
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/logs/payments:
+    get:
+      tags: [后台-系统]
+      summary: 支付日志
+      description: 敏感字段已过滤后落库。
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/logs/emails:
+    get:
+      tags: [后台-系统]
+      summary: 邮件发送日志
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { $ref: '#/components/responses/OK' } }
+
+  /admin/upload:
+    post:
+      tags: [后台-商品]
+      summary: 上传图片
+      description: |
+        限制：≤5MB、仅 JPG/PNG/GIF/WebP（按真实内容嗅探，不信任扩展名与 Content-Type）、
+        文件名与路径完全由服务端生成。SVG 被显式禁止（可内嵌脚本）。
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          url: { type: string }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    OK:
+      description: OK
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Response' }
+
+  schemas:
+    Response:
+      type: object
+      properties:
+        code:    { type: integer, example: 0, description: '0 = 成功；非 0 见错误码表' }
+        message: { type: string, example: success }
+        data:    { type: object, nullable: true }
+
+    PageData:
+      type: object
+      properties:
+        list:      { type: array, items: { type: object } }
+        page:      { type: integer }
+        page_size: { type: integer }
+        total:     { type: integer }
+
+    ShopConfig:
+      type: object
+      properties:
+        site_name:            { type: string }
+        site_title:           { type: string }
+        site_description:     { type: string }
+        site_logo:            { type: string }
+        site_notice:          { type: string }
+        contact:              { type: string }
+        icp:                  { type: string }
+        currency:             { type: string, example: CNY }
+        currency_symbol:      { type: string, example: '¥' }
+        timezone:             { type: string, example: Asia/Shanghai }
+        allow_order:          { type: boolean }
+        maintenance:          { type: boolean }
+        order_expire_minutes: { type: integer }
+        installed:            { type: boolean }
+
+    Product:
+      type: object
+      properties:
+        id:              { type: integer }
+        category_id:     { type: integer }
+        category_name:   { type: string }
+        name:            { type: string }
+        slug:            { type: string }
+        cover:           { type: string }
+        summary:         { type: string }
+        description:     { type: string, description: 富文本，已做 XSS 白名单净化 }
+        price:           { type: integer, description: 分 }
+        original_price:  { type: integer, description: 分，划线价 }
+        stock:           { type: integer, description: 仅 manual 使用；-1 = 无限 }
+        available_stock: { type: integer, description: 实时可用库存（auto = 未使用卡密数） }
+        delivery_type:   { type: string, enum: [auto, manual] }
+        status:          { type: string, enum: [on, off] }
+        sales_count:     { type: integer }
+        is_recommend:    { type: boolean }
+        min_quantity:    { type: integer }
+        max_quantity:    { type: integer }
+
+    Order:
+      type: object
+      properties:
+        order_no:        { type: string, example: '20260826124530A7K2MQ9XB4' }
+        email:           { type: string }
+        status:
+          type: string
+          enum: [pending, paying, paid, waiting_delivery, completed, cancelled, expired, refunded]
+        status_text:     { type: string }
+        original_amount: { type: integer }
+        discount_amount: { type: integer }
+        pay_amount:      { type: integer }
+        coupon_code:     { type: string }
+        payment_method:  { type: string }
+        trade_no:        { type: string }
+        delivery_type:   { type: string, enum: [auto, manual] }
+        delivery_content:
+          type: string
+          description: '卡密 / 发货内容。**只有 status = completed 时才返回。**'
+        created_at:   { type: string }
+        paid_at:      { type: string }
+        delivered_at: { type: string }
+        expired_at:   { type: string }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              product_name:     { type: string }
+              product_price:    { type: integer }
+              quantity:         { type: integer }
+              subtotal:         { type: integer }
+              delivery_content: { type: string }
+
+    DiscountResult:
+      type: object
+      properties:
+        coupon_id:       { type: integer }
+        coupon_code:     { type: string }
+        coupon_name:     { type: string }
+        original_amount: { type: integer }
+        discount_amount: { type: integer }
+        pay_amount:      { type: integer }
+
+    PayResult:
+      type: object
+      properties:
+        action:    { type: string, enum: [redirect, qrcode, form] }
+        url:       { type: string, description: action=redirect 时跳转此地址 }
+        qrcode:    { type: string, description: action=qrcode 时用此内容渲染二维码 }
+        form_html: { type: string, description: action=form 时写入页面（会自动提交） }
+        order_no:  { type: string }
+
+    CategoryInput:
+      type: object
+      required: [name]
+      properties:
+        name:        { type: string }
+        slug:        { type: string, description: 留空则由名称自动生成 }
+        description: { type: string }
+        icon:        { type: string }
+        sort:        { type: integer, description: 越大越靠前 }
+        status:      { type: string, enum: [active, disabled] }
+
+    ProductInput:
+      type: object
+      required: [category_id, name, delivery_type]
+      properties:
+        category_id:    { type: integer }
+        name:           { type: string }
+        slug:           { type: string }
+        cover:          { type: string }
+        summary:        { type: string }
+        description:    { type: string }
+        price:          { type: integer, description: 分，必须 > 0 }
+        original_price: { type: integer }
+        stock:          { type: integer, description: 仅 manual 有效；-1 = 无限 }
+        delivery_type:  { type: string, enum: [auto, manual] }
+        status:         { type: string, enum: [on, off] }
+        sort:           { type: integer }
+        is_recommend:   { type: boolean }
+        min_quantity:   { type: integer }
+        max_quantity:   { type: integer }
+
+    CouponInput:
+      type: object
+      required: [type, scope]
+      properties:
+        code: { type: string, description: 留空则自动生成 }
+        name: { type: string }
+        type: { type: string, enum: [fixed, percent] }
+        value:
+          type: integer
+          description: |
+            fixed → 优惠金额（分），例如满减 ¥20 填 2000
+            percent → **万分比**，9 折填 9000、95 折填 9500
+        min_amount:     { type: integer, description: 最低消费（分），0 = 不限 }
+        max_discount:   { type: integer, description: percent 时的最大优惠（分），0 = 不限 }
+        scope:          { type: string, enum: [all, products] }
+        product_ids:    { type: array, items: { type: integer }, description: scope=products 时必填 }
+        usage_limit:    { type: integer, description: 总次数，0 = 不限 }
+        per_user_limit: { type: integer, description: 单邮箱次数，0 = 不限 }
+        start_at:       { type: string, example: '2026-08-01T00:00:00Z' }
+        expire_at:      { type: string, example: '2026-09-01T00:00:00Z' }
+        status:         { type: string, enum: [active, disabled] }
+
+    ChannelInput:
+      type: object
+      required: [name, provider]
+      properties:
+        name:     { type: string, example: 'Stripe US' }
+        provider: { type: string, enum: [yipay_v1, yipay_v2, alipay, wechat, stripe, hashpay] }
+        icon:     { type: string }
+        config:
+          type: object
+          additionalProperties: { type: string }
+          description: 字段定义见 GET /admin/payments/providers
+        status: { type: string, enum: [enabled, disabled] }
+        sort:   { type: integer }
+        remark: { type: string }

@@ -1,0 +1,52 @@
+# MoeCard 配置文件（可选）
+#
+# 优先级：默认值 < 本文件 < .env < 环境变量
+#
+# 容器部署推荐只用环境变量，本文件主要方便本地开发。
+# 使用方式：cp config/config.example.yaml config/config.yaml
+
+app:
+  env: development          # production | development
+  host: 0.0.0.0
+  port: 8080
+
+  # 生产环境必须 >= 32 位。生成：openssl rand -hex 32
+  jwt_secret: ""
+  jwt_expire: 12h
+
+  # 支付异步回调会打到 base_url，生产环境必须是公网可访问地址
+  base_url: "http://127.0.0.1:8080"
+  frontend_url: "http://127.0.0.1:5173"
+
+  # 只有在可信反向代理后面才开启，否则可被伪造 IP 绕过限流
+  trust_proxy: false
+
+database:
+  driver: sqlite            # sqlite | mysql
+
+  sqlite:
+    path: ./data/moecard.db
+
+  mysql:
+    host: 127.0.0.1
+    port: 3306
+    username: moecard
+    password: ""
+    database: moecard
+    charset: utf8mb4
+
+  max_open_conns: 50
+  max_idle_conns: 10
+  conn_max_lifetime: 1h
+  slow_threshold: 300ms     # 超过这个时间的 SQL 会打警告日志
+
+log:
+  level: info               # debug | info | warn | error
+  format: text              # text | json
+  file: ""                  # 留空则只输出到 stdout
+
+storage:
+  driver: local
+  local_path: ./storage/uploads
+  url_prefix: /uploads
+  max_size: 5242880         # 5MB

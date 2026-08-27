@@ -1,0 +1,218 @@
+name: Release
+
+# 打了 v 开头的标签就发布。也可以在 Actions 页面手动触发做演练。
+#
+#   git tag v1.0.1 && git push origin v1.0.1
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '演练用的版本号（不会创建 Release）'
+        required: false
+        default: '0.0.0-dryrun'
+
+permissions:
+  contents: write   # 创建 Release 需要
+
+env:
+  GO_VERSION: '1.24'
+  NODE_VERSION: '24'
+
+jobs:
+  # 前端只构建一次，六个平台共用同一份产物。
+  # 每个平台各跑一遍 npm 是纯浪费，而且六份产物不保证字节一致。
+  web:
+    name: 构建前端
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 安装依赖
+        working-directory: web
+        run: npm ci
+
+      - name: 类型检查
+        working-directory: web
+        run: npx vue-tsc --noEmit -p tsconfig.app.json
+
+      - name: 构建
+        working-directory: web
+        run: npm run build
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-dist
+          path: server/internal/web/dist
+          retention-days: 1
+          if-no-files-found: error
+
+  test:
+    name: 后端测试
+    runs-on: ubuntu-latest
+    needs: web
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: server/go.sum
+
+      # 前端产物是 go:embed 的输入，没有它连编译都过不去
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: server/internal/web/dist
+
+      - name: gofmt
+        working-directory: server
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "以下文件没有格式化：" && echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        working-directory: server
+        run: go vet ./...
+
+      - name: go test
+        working-directory: server
+        run: go test ./...
+
+  build:
+    name: ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    needs: [web, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: server/go.sum
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: server/internal/web/dist
+
+      - name: 取版本号
+        id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 交叉编译
+        working-directory: server
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          # 数据库驱动是纯 Go 的（glebarez/sqlite），所以交叉编译不需要
+          # 任何 C 工具链，六个平台在同一台机器上就能出完
+          CGO_ENABLED: '0'
+        run: |
+          VERSION="${{ steps.v.outputs.version }}"
+          EXT=""
+          [ "$GOOS" = "windows" ] && EXT=".exe"
+          LDFLAGS="-s -w"
+          LDFLAGS="$LDFLAGS -X main.version=$VERSION"
+          LDFLAGS="$LDFLAGS -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          LDFLAGS="$LDFLAGS -X main.gitCommit=${GITHUB_SHA::7}"
+          go build -trimpath -ldflags="$LDFLAGS" -o "../build/moecard$EXT" ./cmd/server
+          go build -trimpath -ldflags="-s -w" -o "../build/moecard-migrate$EXT" ./cmd/migrate
+
+      - name: 打包
+        run: |
+          VERSION="${{ steps.v.outputs.version }}"
+          GOOS="${{ matrix.goos }}"
+          GOARCH="${{ matrix.goarch }}"
+          NAME="moecard_${VERSION}_${GOOS}_${GOARCH}"
+
+          mkdir -p "pkg/$NAME"
+          cp build/moecard* "pkg/$NAME/"
+          cp README.md "pkg/$NAME/"
+          cp .env.example "pkg/$NAME/"
+          # 给不看 README 的人准备的中文速查
+          cp docs/使用说明.txt "pkg/$NAME/"
+          # 升级和卸载脚本要跟着走 —— 装完之后才需要它们，
+          # 那时候人手里只有解压出来的这个目录
+          mkdir -p "pkg/$NAME/scripts"
+          cp scripts/upgrade.sh scripts/uninstall.sh "pkg/$NAME/scripts/"
+          chmod +x "pkg/$NAME/scripts/"*.sh
+          [ -f LICENSE ] && cp LICENSE "pkg/$NAME/" || true
+          # 数据目录留个空壳，解压即用
+          mkdir -p "pkg/$NAME/data" "pkg/$NAME/storage/uploads"
+
+          mkdir -p dist
+          cd pkg
+          if [ "$GOOS" = "windows" ]; then
+            zip -qr "../dist/$NAME.zip" "$NAME"
+          else
+            tar -czf "../dist/$NAME.tar.gz" "$NAME"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pkg-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          retention-days: 1
+          if-no-files-found: error
+
+  release:
+    name: 发布
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pkg-*
+          path: dist
+          merge-multiple: true
+
+      # 校验和文件是自更新唯一的完整性依据，必须和安装包在同一个 Release 里。
+      # 少了它，客户端会拒绝更新（而不是"跳过校验凑合装"）。
+      - name: 生成校验和
+        working-directory: dist
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # 发布说明来自 docs/RELEASE_NOTES.md。
+      # 发版流程就是「改版本亮点 → 打标签」，不用动这个文件。
+      # 文件里的 1.0.0 之类的字样记得跟着版本一起改。
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          body_path: docs/RELEASE_NOTES.md
+          # 自动生成的提交列表接在后面，人写的亮点在前
+          append_body: true
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

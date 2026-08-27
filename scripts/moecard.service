@@ -1,0 +1,66 @@
+# MoeCard systemd 单元
+#
+# 由 moecard -install-service 生成。想手工改就直接编辑本文件，
+# 改完 systemctl daemon-reload && systemctl restart moecard。
+
+[Unit]
+Description=MoeCard 数字商品自动发货商城
+Documentation=https://github.com/qixishunzi/MoeCard
+After=network-online.target
+Wants=network-online.target
+
+# 挂掉时别刷屏重启：60 秒内连挂 5 次就不再自动拉起。
+# 这两个键必须放在 [Unit] 里 —— 写在 [Service] 里 systemd 只会打一行
+# "Unknown key ... ignoring" 然后无视，配上 Restart=always 就是无限重启。
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# 别用 root 跑。这个进程要处理公网请求，一旦被打穿，
+# 用哪个身份跑决定了对方能拿到多少东西。
+User=moecard
+Group=moecard
+
+WorkingDirectory=/opt/moecard
+ExecStart=/opt/moecard/moecard
+
+# 配置从工作目录的 .env 读，这里不用再传环境变量。
+# 真要覆盖就用 Environment= 或者 EnvironmentFile=
+#
+# 注意 .env 里的 SQLITE_PATH / STORAGE_LOCAL_PATH 要用相对路径。
+# 写成 /app/... 那种容器内的绝对路径，下面的 ReadWritePaths 挡不住它，
+# 服务会因为写不了那个目录而起不来（.env.example 里默认已经是相对路径）。
+
+Restart=always
+RestartSec=5s
+
+# 日志交给 journald：journalctl -u moecard -f
+StandardOutput=journal
+StandardError=journal
+
+# ---- 沙箱 ----
+# 这些是「万一被 RCE 了，对方能干什么」的边界。
+# 自更新要写自己所在的目录，所以 ProtectSystem 用 full 而不是 strict，
+# 并把工作目录显式放进 ReadWritePaths。
+ProtectSystem=full
+ReadWritePaths=/opt/moecard
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# 想让 80/443 直接由它监听（不套 Nginx）时解开这一行，
+# 否则非 root 用户绑不了 1024 以下的端口
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

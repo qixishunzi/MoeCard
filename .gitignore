@@ -1,0 +1,55 @@
+# 环境变量与密钥 —— 绝对不能提交
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+!server/internal/**/*.key
+
+# 数据与上传文件
+/data/
+/server/data/
+/server/storage/uploads/*
+!/server/storage/uploads/.gitkeep
+/logs/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# 构建产物
+/server/moecard
+/server/moecard.exe
+/server/moecard-migrate
+/server/moecard-migrate.exe
+/server/config/config.yaml
+/web/dist/
+/web/node_modules/
+# 前端构建产物：整个 dist 都不入库，只保留 .gitkeep 让 go:embed 有目录可嵌。
+# 没有前端构建时会自动回退到 internal/web/placeholder.html。
+/server/internal/web/dist/*
+!/server/internal/web/dist/.gitkeep
+
+# 自动生成的类型声明
+/web/auto-imports.d.ts
+/web/components.d.ts
+
+# IDE / 系统文件
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 打包产物
+/dist/
+
+# 发布构建产物（由 .github/workflows/release.yml 生成）。
+# /dist/ 上面已经整个忽略了，这里只补它之外的两个。
+/build/
+/pkg/
+
+# 自更新留下的备份
+*.old
+*.new

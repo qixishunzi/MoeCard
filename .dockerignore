@@ -1,0 +1,36 @@
+# 不要把这些带进构建上下文 —— 会拖慢构建，也可能泄露密钥
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+.git
+.github
+.idea
+.vscode
+
+# 依赖与构建产物由镜像内部重新生成
+web/node_modules
+web/dist
+web/auto-imports.d.ts
+web/components.d.ts
+server/moecard
+server/moecard.exe
+server/moecard-migrate
+server/moecard-migrate.exe
+
+# 运行时数据绝不能进镜像
+server/data
+server/storage/uploads/*
+!server/storage/uploads/.gitkeep
+server/config/config.yaml
+data
+logs
+*.db
+*.db-shm
+*.db-wal
+*.sqlite*
+
+docs
+README.md
